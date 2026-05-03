@@ -128,6 +128,8 @@ export default function HomePage() {
       // Always show the dashboard even if data is zero (user request)
       setIsPreElection(false);
 
+      const totalSeats = json.parties?.reduce((s, p) => s + p.total, 0) ?? 0;
+
       setData(json);
       setLastFetched(new Date());
 
