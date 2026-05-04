@@ -97,42 +97,70 @@ function getMockData(): ElectionData {
   };
 }
 
+// ── Proxy services for bypassing ECI IP blocks on cloud servers ───────────────
+const PROXY_PREFIXES = [
+  "", // Direct fetch (works from residential IPs)
+  "https://api.allorigins.win/raw?url=",
+  "https://api.codetabs.com/v1/proxy?quest=",
+];
+
 // ── Main scraper ──────────────────────────────────────────────────────────────
 async function scrapeECI(): Promise<ElectionData> {
   const errors: string[] = [];
+  const targetUrl = ECI_URLS[0]; // Primary URL
 
-  for (const url of ECI_URLS) {
+  // Try direct fetch first, then proxy fallbacks
+  for (const proxy of PROXY_PREFIXES) {
+    const fetchUrl = proxy ? `${proxy}${encodeURIComponent(targetUrl)}` : targetUrl;
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12_000);
+      const timeout = setTimeout(() => controller.abort(), 15_000);
 
-      const res = await fetch(url, {
-        headers: HEADERS,
+      const res = await fetch(fetchUrl, {
+        headers: proxy ? {} : HEADERS, // Don't send custom headers through proxies
         signal: controller.signal,
         cache: "no-store",
       });
       clearTimeout(timeout);
 
       if (!res.ok) {
-        errors.push(`${url}: HTTP ${res.status}`);
+        errors.push(`${proxy ? "proxy" : "direct"}: HTTP ${res.status}`);
         continue;
       }
 
       const html = await res.text();
 
       // Check if this page has Tamil Nadu election result data
-      const parsed = parseECIHtml(html, url);
+      const parsed = parseECIHtml(html, targetUrl);
       if (parsed && parsed.parties.some((p) => p.total > 0)) {
-        console.log(`[ECI] ✓ Live data from ${url}`);
+        console.log(`[ECI] ✓ Live data via ${proxy ? "proxy" : "direct"}`);
         return { ...parsed, dataSource: "live", lastUpdated: new Date().toISOString() };
       }
 
-      // Page loaded but no TN result data → still counting/before results
       if (parsed) {
-        console.log(`[ECI] Page loaded but zero data from ${url} — pre-election state`);
-        errors.push(`${url}: Page has TN structure but all zeros (pre-counting)`);
+        errors.push(`${proxy ? "proxy" : "direct"}: TN structure but all zeros`);
       } else {
-        errors.push(`${url}: No Tamil Nadu data found`);
+        errors.push(`${proxy ? "proxy" : "direct"}: No TN data found`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${proxy ? "proxy" : "direct"}: ${msg}`);
+    }
+  }
+
+  // Also try other ECI URL patterns directly
+  for (const url of ECI_URLS.slice(1)) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+      const res = await fetch(url, { headers: HEADERS, signal: controller.signal, cache: "no-store" });
+      clearTimeout(timeout);
+      if (!res.ok) { errors.push(`${url}: HTTP ${res.status}`); continue; }
+      const html = await res.text();
+      const parsed = parseECIHtml(html, url);
+      if (parsed && parsed.parties.some((p) => p.total > 0)) {
+        console.log(`[ECI] ✓ Live data from fallback ${url}`);
+        return { ...parsed, dataSource: "live", lastUpdated: new Date().toISOString() };
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -142,9 +170,9 @@ async function scrapeECI(): Promise<ElectionData> {
 
   console.warn("[ECI Scraper] No live data available:", errors.join(" | "));
 
-  // Return pre-election placeholder (zeros) — frontend will show countdown
+  // Return pre-election placeholder (zeros)
   const placeholder = getPreElectionPlaceholder();
-  placeholder.error = `ECI servers not yet serving results. Counting may not have started. (${errors[0]})`;
+  placeholder.error = `ECI data unavailable from cloud. Errors: ${errors.slice(0, 3).join("; ")}`;
   return placeholder;
 }
 
