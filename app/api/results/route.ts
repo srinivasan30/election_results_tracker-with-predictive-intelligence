@@ -33,11 +33,12 @@ const CACHE_TTL_MS = 20_000; // 20 seconds
 // Tamil Nadu state code on ECI results site: S22
 // The exact path changes per election cycle; we try multiple known patterns.
 const ECI_URLS = [
-  // 2026 TN state election patterns (will activate once ECI publishes)
+  // Live TN state election pattern (May 2026)
+  "https://results.eci.gov.in/ResultAcGenMay2026/partywiseresult-S22.htm",
   "https://results.eci.gov.in/AcResultGen2026/partywiseresult-S22.htm",
   "https://results.eci.gov.in/AcResult2026/partywiseresult-S22.htm",
   "https://results.eci.gov.in/partywiseresult-S22.htm",
-  // Fallback: main results portal (often has a JS-rendered state selector)
+  // Fallback: main results portal
   "https://results.eci.gov.in/",
 ];
 
@@ -181,9 +182,9 @@ function parseECIHtml(html: string, _url: string): ElectionData | null {
 
           const won = parseNum(col1);
           const leading = cells.length >= 4 ? parseNum($(cells[2]).text()) : 0;
-          const totalCell = cells.length >= 5 ? $(cells[3]).text() : $(cells[2]).text();
+          const totalCell = cells.length >= 4 ? $(cells[3]).text() : $(cells[2]).text();
           const total = parseNum(totalCell) || won + leading;
-          const voteShareCell = cells.length >= 5 ? $(cells[4]).text() : $(cells[3])?.text() ?? "0";
+          const voteShareCell = cells.length >= 5 ? $(cells[4]).text() : "0";
           const voteShare = parseFloat(voteShareCell.replace(/[^0-9.]/g, "")) || 0;
 
           const normName = normaliseParty(col0);
