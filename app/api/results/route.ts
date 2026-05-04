@@ -29,18 +29,13 @@ let cache: { data: ElectionData | null; timestamp: number } = {
 };
 const CACHE_TTL_MS = 20_000; // 20 seconds
 
-// ── ECI candidate URLs for TN 2026 state election ────────────────────────────
-// Tamil Nadu state code on ECI results site: S22
-// The exact path changes per election cycle; we try multiple known patterns.
-const ECI_URLS = [
-  // Live TN state election pattern (May 2026)
-  "https://results.eci.gov.in/ResultAcGenMay2026/partywiseresult-S22.htm",
-  "https://results.eci.gov.in/AcResultGen2026/partywiseresult-S22.htm",
-  "https://results.eci.gov.in/AcResult2026/partywiseresult-S22.htm",
-  "https://results.eci.gov.in/partywiseresult-S22.htm",
-  // Fallback: main results portal
-  "https://results.eci.gov.in/",
-];
+// ── ECI URL ──────────────────────────────────────────────────────────────────
+const ECI_URL = "https://results.eci.gov.in/ResultAcGenMay2026/partywiseresult-S22.htm";
+
+// Google Apps Script proxy URL — set this env var on Vercel
+// This is needed because ECI blocks all datacenter IPs (Vercel, AWS, etc.)
+// Google's IPs are NOT blocked, so a Google Apps Script acts as a relay
+const GAS_PROXY_URL = process.env.GAS_PROXY_URL || "";
 
 const HEADERS: Record<string, string> = {
   "User-Agent":
@@ -48,22 +43,19 @@ const HEADERS: Record<string, string> = {
   Accept:
     "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   "Accept-Language": "en-IN,en;q=0.9,ta;q=0.8",
-  "Accept-Encoding": "gzip, deflate, br",
   Connection: "keep-alive",
   "Cache-Control": "no-cache",
   Pragma: "no-cache",
   Referer: "https://results.eci.gov.in/",
 };
 
-// ── Pre-election representative data ─────────────────────────────────────────
-// Shown when ECI site has no data yet (before counting begins).
-// Based on 2021 election results as baseline — will be replaced by live data.
+// ── Pre-election placeholder ─────────────────────────────────────────────────
 function getPreElectionPlaceholder(): ElectionData {
   return {
     state: "Tamil Nadu",
     totalSeats: 234,
     majorityMark: 118,
-    countingStatus: "Awaiting Results — Counting begins at 8 AM IST",
+    countingStatus: "Awaiting Results",
     lastUpdated: new Date().toISOString(),
     dataSource: "mock",
     parties: [
@@ -73,115 +65,95 @@ function getPreElectionPlaceholder(): ElectionData {
       { party: "NTK", won: 0, leading: 0, total: 0, voteShare: 0 },
       { party: "Others", won: 0, leading: 0, total: 0, voteShare: 0 },
     ],
-    error: "Election counting has not started yet. Data will update automatically at 8:00 AM IST on counting day.",
   };
 }
 
-// Representative sample data (used if ECI down mid-count for demo purposes)
-function getMockData(): ElectionData {
-  return {
-    state: "Tamil Nadu",
-    totalSeats: 234,
-    majorityMark: 118,
-    countingStatus: "Counting in Progress",
-    lastUpdated: new Date().toISOString(),
-    dataSource: "mock",
-    parties: [
-      { party: "DMK", won: 92, leading: 45, total: 137, voteShare: 38.2 },
-      { party: "AIADMK", won: 28, leading: 18, total: 46, voteShare: 22.7 },
-      { party: "TVK", won: 8, leading: 12, total: 20, voteShare: 10.4 },
-      { party: "NTK", won: 2, leading: 4, total: 6, voteShare: 6.1 },
-      { party: "Others", won: 12, leading: 13, total: 25, voteShare: 22.6 },
-    ],
-    error: "Live data unavailable. Displaying representative sample data — not actual results.",
-  };
-}
-
-// ── Proxy services for bypassing ECI IP blocks on cloud servers ───────────────
-const PROXY_PREFIXES = [
-  "", // Direct fetch (works from residential IPs)
-  "https://api.allorigins.win/raw?url=",
-  "https://api.codetabs.com/v1/proxy?quest=",
-];
-
-// ── Main scraper ──────────────────────────────────────────────────────────────
-async function scrapeECI(): Promise<ElectionData> {
+// ── Fetch HTML from ECI (multiple strategies) ────────────────────────────────
+async function fetchECIHtml(): Promise<{ html: string; source: string } | null> {
   const errors: string[] = [];
-  const targetUrl = ECI_URLS[0]; // Primary URL
 
-  // Try direct fetch first, then proxy fallbacks
-  for (const proxy of PROXY_PREFIXES) {
-    const fetchUrl = proxy ? `${proxy}${encodeURIComponent(targetUrl)}` : targetUrl;
+  // Strategy 1: Direct fetch (works from residential IPs / localhost)
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12_000);
+    const res = await fetch(ECI_URL, {
+      headers: HEADERS,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (res.ok) {
+      const html = await res.text();
+      if (html.length > 500) {
+        console.log("[ECI] ✓ Direct fetch succeeded");
+        return { html, source: "direct" };
+      }
+    } else {
+      errors.push(`direct: HTTP ${res.status}`);
+    }
+  } catch (err) {
+    errors.push(`direct: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Strategy 2: Google Apps Script proxy (works from Vercel)
+  if (GAS_PROXY_URL) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15_000);
-
-      const res = await fetch(fetchUrl, {
-        headers: proxy ? {} : HEADERS, // Don't send custom headers through proxies
-        signal: controller.signal,
-        cache: "no-store",
-      });
+      const gasUrl = `${GAS_PROXY_URL}?url=${encodeURIComponent(ECI_URL)}`;
+      const res = await fetch(gasUrl, { signal: controller.signal });
       clearTimeout(timeout);
-
-      if (!res.ok) {
-        errors.push(`${proxy ? "proxy" : "direct"}: HTTP ${res.status}`);
-        continue;
-      }
-
-      const html = await res.text();
-
-      // Check if this page has Tamil Nadu election result data
-      const parsed = parseECIHtml(html, targetUrl);
-      if (parsed && parsed.parties.some((p) => p.total > 0)) {
-        console.log(`[ECI] ✓ Live data via ${proxy ? "proxy" : "direct"}`);
-        return { ...parsed, dataSource: "live", lastUpdated: new Date().toISOString() };
-      }
-
-      if (parsed) {
-        errors.push(`${proxy ? "proxy" : "direct"}: TN structure but all zeros`);
+      if (res.ok) {
+        const text = await res.text();
+        // GAS might return JSON wrapper or raw HTML
+        let html = text;
+        try {
+          const json = JSON.parse(text);
+          html = json.html || json.content || json.data || text;
+        } catch {
+          // Already raw HTML
+        }
+        if (html.length > 500) {
+          console.log("[ECI] ✓ Google Apps Script proxy succeeded");
+          return { html, source: "gas-proxy" };
+        }
       } else {
-        errors.push(`${proxy ? "proxy" : "direct"}: No TN data found`);
+        errors.push(`gas-proxy: HTTP ${res.status}`);
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      errors.push(`${proxy ? "proxy" : "direct"}: ${msg}`);
+    } catch (err) {
+      errors.push(`gas-proxy: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  // Also try other ECI URL patterns directly
-  for (const url of ECI_URLS.slice(1)) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10_000);
-      const res = await fetch(url, { headers: HEADERS, signal: controller.signal, cache: "no-store" });
-      clearTimeout(timeout);
-      if (!res.ok) { errors.push(`${url}: HTTP ${res.status}`); continue; }
-      const html = await res.text();
-      const parsed = parseECIHtml(html, url);
-      if (parsed && parsed.parties.some((p) => p.total > 0)) {
-        console.log(`[ECI] ✓ Live data from fallback ${url}`);
-        return { ...parsed, dataSource: "live", lastUpdated: new Date().toISOString() };
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      errors.push(`${url}: ${msg}`);
-    }
+  console.warn("[ECI] All fetch strategies failed:", errors.join(" | "));
+  return null;
+}
+
+// ── Main scraper ──────────────────────────────────────────────────────────────
+async function scrapeECI(): Promise<ElectionData> {
+  const result = await fetchECIHtml();
+
+  if (!result) {
+    const placeholder = getPreElectionPlaceholder();
+    placeholder.error = "ECI data unavailable. If on Vercel, set GAS_PROXY_URL env var.";
+    return placeholder;
   }
 
-  console.warn("[ECI Scraper] No live data available:", errors.join(" | "));
+  const parsed = parseECIHtml(result.html);
+  if (parsed && parsed.parties.some((p) => p.total > 0)) {
+    return { ...parsed, dataSource: "live", lastUpdated: new Date().toISOString() };
+  }
 
-  // Return pre-election placeholder (zeros)
+  // Page loaded but zero data — pre-election state
   const placeholder = getPreElectionPlaceholder();
-  placeholder.error = `ECI data unavailable from cloud. Errors: ${errors.slice(0, 3).join("; ")}`;
+  placeholder.error = "ECI page loaded but no results data yet.";
   return placeholder;
 }
 
 // ── HTML parser ───────────────────────────────────────────────────────────────
-function parseECIHtml(html: string, _url: string): ElectionData | null {
+function parseECIHtml(html: string): ElectionData | null {
   try {
     const $ = cheerio.load(html);
 
-    // Heuristic: does this page mention Tamil Nadu?
     const bodyText = $("body").text().toLowerCase();
     const hasTN =
       bodyText.includes("tamil") ||
@@ -192,7 +164,7 @@ function parseECIHtml(html: string, _url: string): ElectionData | null {
 
     const partiesMap = new Map<string, PartyResult>();
 
-    // Strategy: scan every table for party-result rows
+    // Scan every table for party-result rows
     $("table").each((_i, table) => {
       $(table)
         .find("tr")
@@ -201,14 +173,12 @@ function parseECIHtml(html: string, _url: string): ElectionData | null {
           if (cells.length < 3) return;
 
           const col0 = $(cells[0]).text().trim();
-          const col1 = $(cells[1]).text().trim();
-          const col2 = $(cells[2]).text().trim();
 
           // Skip headers / total rows
           if (!col0 || /^(party|total|sl\.?no|s\.?no|#)/i.test(col0)) return;
           if (/^(total|grand total)/i.test(col0)) return;
 
-          const won = parseNum(col1);
+          const won = parseNum($(cells[1]).text());
           const leading = cells.length >= 4 ? parseNum($(cells[2]).text()) : 0;
           const totalCell = cells.length >= 4 ? $(cells[3]).text() : $(cells[2]).text();
           const total = parseNum(totalCell) || won + leading;
@@ -230,10 +200,7 @@ function parseECIHtml(html: string, _url: string): ElectionData | null {
         });
     });
 
-    if (partiesMap.size === 0) {
-      // Try a fallback: look for JSON-LD or data- attributes
-      return null;
-    }
+    if (partiesMap.size === 0) return null;
 
     // Consolidate known parties vs Others
     const KNOWN = ["DMK", "AIADMK", "TVK", "NTK"];
@@ -250,7 +217,7 @@ function parseECIHtml(html: string, _url: string): ElectionData | null {
       }
     }
 
-    // Ensure all known parties present (with zeros if absent)
+    // Ensure all known parties present
     for (const k of KNOWN) {
       if (!mainParties.find((p) => p.party === k)) {
         mainParties.push({ party: k, won: 0, leading: 0, total: 0, voteShare: 0 });
@@ -269,7 +236,7 @@ function parseECIHtml(html: string, _url: string): ElectionData | null {
     const countingStatus =
       totalReported === 0
         ? "Awaiting Results"
-        : totalReported < 200
+        : totalReported < 234
         ? "Counting in Progress"
         : "Counting Complete";
 
@@ -302,7 +269,6 @@ function normaliseParty(raw: string): string {
   if (u === "NTK" || u.includes("NAM TAMILAR")) return "NTK";
   if (u === "INC" || u.includes("INDIAN NATIONAL CONGRESS")) return "INC";
   if (u === "BJP" || u.includes("BHARATIYA JANATA")) return "BJP";
-  // Return non-empty party names as-is for Others aggregation
   return raw.trim().length > 1 ? raw.trim() : "";
 }
 
@@ -337,7 +303,7 @@ export async function GET() {
       });
     }
 
-    // Last resort: zeros placeholder
+    // Last resort
     const fallback = getPreElectionPlaceholder();
     fallback.error = `ECI unavailable: ${msg}`;
     return NextResponse.json(fallback, { status: 200 });
