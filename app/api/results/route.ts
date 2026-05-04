@@ -267,8 +267,9 @@ function parseNum(s: string): number {
 
 function normaliseParty(raw: string): string {
   const u = raw.toUpperCase().replace(/\s+/g, " ").trim();
+  // IMPORTANT: Check AIADMK BEFORE DMK — both contain "DRAVIDA MUNNETRA"
+  if (u === "AIADMK" || u.includes("ALL INDIA ANNA") || u.includes("ANNA DRAVIDA") || u.includes("A.I.A.D.M.K")) return "AIADMK";
   if (u === "DMK" || u.includes("DRAVIDA MUNNETRA")) return "DMK";
-  if (u === "AIADMK" || u.includes("ANNA DRAVIDA") || u.includes("ALL INDIA ANNA")) return "AIADMK";
   if (u === "TVK" || u.includes("TAMILAGA VETTRI") || u.includes("VETTRI KAZHAGAM")) return "TVK";
   if (u === "NTK" || u.includes("NAM TAMILAR")) return "NTK";
   if (u === "INC" || u.includes("INDIAN NATIONAL CONGRESS")) return "INC";
